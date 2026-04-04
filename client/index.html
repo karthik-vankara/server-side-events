@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SSE Learning — Phase 5</title>
+  <style>
+    body { font-family: monospace; padding: 20px; }
+    .status { padding: 10px; margin: 10px 0; font-weight: bold; }
+    .status.connected { background: #d4edda; color: #155724; }
+    .status.disconnected { background: #f8d7da; color: #721c24; }
+    .status.connecting { background: #fff3cd; color: #856404; }
+    .info { background: #e2e3e5; padding: 10px; margin: 10px 0; }
+    .panel { border: 1px solid #ccc; padding: 10px; margin: 10px 0; }
+    .panel h3 { margin-top: 0; }
+    #messages { max-height: 300px; overflow-y: auto; }
+    #messages .msg { margin: 4px 0; padding: 4px 8px; border-bottom: 1px solid #eee; font-size: 0.9em; }
+    #messages .msg .meta { color: #888; font-size: 0.85em; }
+    #messages .msg.system { background: #e8f4fd; }
+    #messages .msg.event { background: #f0f0f0; }
+    #messages .msg.alert { background: #ffe0e0; }
+    #messages .msg.update { background: #e0f0ff; }
+    button { padding: 8px 16px; margin: 4px; cursor: pointer; }
+    input, select { padding: 6px; margin: 4px; }
+    .sub-tag { display: inline-block; background: #007bff; color: #fff; padding: 2px 8px; margin: 2px; border-radius: 3px; font-size: 0.85em; }
+  </style>
+</head>
+<body>
+  <h1>SSE Phase 5: Multi-Client Pub/Sub</h1>
+
+  <!-- Connection status -->
+  <div id="status" class="status disconnected">Disconnected</div>
+
+  <!-- Subscription controls -->
+  <div class="panel">
+    <h3>Subscriptions</h3>
+    <p>Choose which event types this client receives:</p>
+    <label><input type="checkbox" value="*" checked> * (all)</label>
+    <label><input type="checkbox" value="message" checked> message</label>
+    <label><input type="checkbox" value="alert" checked> alert</label>
+    <label><input type="checkbox" value="update" checked> update</label>
+    <br>
+    <button id="btnConnect">Connect with Subscriptions</button>
+    <button id="btnClose">Close</button>
+    <button id="btnStatus">Check /status</button>
+    <p>Active subscriptions: <span id="activeSubs"></span></p>
+  </div>
+
+  <!-- Broadcast form -->
+  <div class="panel">
+    <h3>Broadcast to All Clients</h3>
+    <select id="broadcastEvent">
+      <option value="alert">alert</option>
+      <option value="update">update</option>
+      <option value="message">message</option>
+      <option value="custom">custom</option>
+    </select>
+    <input type="text" id="broadcastData" placeholder="Message data..." style="width: 300px;">
+    <button id="btnBroadcast">Broadcast</button>
+  </div>
+
+  <!-- State panel -->
+  <div class="info">
+    <p><strong>readyState:</strong> <span id="readyState">—</span></p>
+    <p><strong>Messages received:</strong> <span id="msgCount">0</span></p>
+  </div>
+
+  <!-- Message log -->
+  <h2>Messages</h2>
+  <div id="messages"></div>
+
+  <script>
+    const statusDiv = document.getElementById('status');
+    const readyStateSpan = document.getElementById('readyState');
+    const msgCountSpan = document.getElementById('msgCount');
+    const messagesDiv = document.getElementById('messages');
+    const activeSubsSpan = document.getElementById('activeSubs');
+
+    let source = null;
+    let msgCount = 0;
+
+    // ──────────────────────────────────────────────
+    // Get selected subscriptions from checkboxes
+    // ──────────────────────────────────────────────
+    function getSelectedSubscriptions() {
+      const checkboxes = document.querySelectorAll('.panel input[type="checkbox"]:checked');
+      return Array.from(checkboxes).map((cb) => cb.value);
+    }
+
+    function renderSubscriptions() {
+      const subs = getSelectedSubscriptions();
+      activeSubsSpan.innerHTML = subs.map((s) => `<span class="sub-tag">${s}</span>`).join('');
+    }
+
+    // Update subscription display on any checkbox change
+    document.querySelectorAll('.panel input[type="checkbox"]').forEach((cb) => {
+      cb.addEventListener('change', function () {
+        // If "*" is checked, check everything; if unchecked, uncheck everything
+        if (this.value === '*') {
+          document.querySelectorAll('.panel input[type="checkbox"]').forEach((c) => {
+            c.checked = this.checked;
+          });
+        } else {
+          // If any specific box is unchecked, uncheck "*"
+          if (!this.checked) {
+            document.querySelector('.panel input[type="checkbox"][value="*"]').checked = false;
+          }
+        }
+        renderSubscriptions();
+      });
+    });
+
+    // ──────────────────────────────────────────────
+    // Status helper
+    // ──────────────────────────────────────────────
+    function updateStatus(state) {
+      const labels = { 0: 'CONNECTING', 1: 'OPEN', 2: 'CLOSED' };
+      const classes = { 0: 'connecting', 1: 'connected', 2: 'disconnected' };
+      statusDiv.textContent = labels[state];
+      statusDiv.className = 'status ' + classes[state];
+      readyStateSpan.textContent = `${state} — ${labels[state]}`;
+    }
+
+    // ──────────────────────────────────────────────
+    // Message helper
+    // ──────────────────────────────────────────────
+    function addMessage(text, type) {
+      const div = document.createElement('div');
+      div.className = `msg ${type}`;
+      div.innerHTML = text;
+      messagesDiv.appendChild(div);
+      messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    }
+
+    // ──────────────────────────────────────────────
+    // Create EventSource with subscriptions
+    // ──────────────────────────────────────────────
+    function connect() {
+      if (source) {
+        source.close();
+      }
+
+      const subs = getSelectedSubscriptions();
+      const query = subs.length ? `?subscribe=${subs.join(',')}` : '';
+
+      updateStatus(0);
+      source = new EventSource(`/events${query}`);
+
+      source.onopen = function () {
+        updateStatus(1);
+        addMessage(`<span class="meta">[system]</span> Connected with subs: ${subs.join(', ')}`, 'system');
+      };
+
+      // Listen for each event type individually
+      source.addEventListener('message', function (event) {
+        msgCount++;
+        msgCountSpan.textContent = msgCount;
+        addMessage(`<span class="meta">[message] id=${event.lastEventId}</span> ${event.data}`, 'event');
+      });
+
+      source.addEventListener('alert', function (event) {
+        msgCount++;
+        msgCountSpan.textContent = msgCount;
+        addMessage(`<span class="meta">[alert] id=${event.lastEventId}</span> ${event.data}`, 'alert');
+      });
+
+      source.addEventListener('update', function (event) {
+        msgCount++;
+        msgCountSpan.textContent = msgCount;
+        addMessage(`<span class="meta">[update] id=${event.lastEventId}</span> ${event.data}`, 'update');
+      });
+
+      source.onerror = function () {
+        updateStatus(source.readyState);
+      };
+    }
+
+    // ──────────────────────────────────────────────
+    // Button: Connect with current subscriptions
+    // ──────────────────────────────────────────────
+    document.getElementById('btnConnect').addEventListener('click', function () {
+      connect();
+    });
+
+    // ──────────────────────────────────────────────
+    // Button: Close connection
+    // ──────────────────────────────────────────────
+    document.getElementById('btnClose').addEventListener('click', function () {
+      if (source) {
+        source.close();
+        updateStatus(2);
+        addMessage(`<span class="meta">[system]</span> Connection closed`, 'system');
+      }
+    });
+
+    // ──────────────────────────────────────────────
+    // Button: Broadcast a message via POST /broadcast
+    // ──────────────────────────────────────────────
+    document.getElementById('btnBroadcast').addEventListener('click', async function () {
+      const event = document.getElementById('broadcastEvent').value;
+      const data = document.getElementById('broadcastData').value;
+      if (!data) return;
+
+      try {
+        const res = await fetch('/broadcast', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ event, data }),
+        });
+        const result = await res.json();
+        addMessage(`<span class="meta">[system]</span> Broadcast sent: event="${event}" data="${data}"`, 'system');
+      } catch (err) {
+        addMessage(`<span class="meta">[system]</span> Broadcast failed: ${err.message}`, 'system');
+      }
+    });
+
+    // ──────────────────────────────────────────────
+    // Button: Check /status
+    // ──────────────────────────────────────────────
+    document.getElementById('btnStatus').addEventListener('click', async function () {
+      try {
+        const res = await fetch('/status');
+        const data = await res.json();
+        addMessage(
+          `<span class="meta">[system]</span> Server: ${data.activeConnections} clients, ${data.bufferSize} messages buffered`,
+          'system'
+        );
+      } catch (err) {
+        addMessage(`<span class="meta">[system]</span> Status fetch failed`, 'system');
+      }
+    });
+
+    // ──────────────────────────────────────────────
+    // Initial render
+    // ──────────────────────────────────────────────
+    renderSubscriptions();
+  </script>
+</body>
+</html>
