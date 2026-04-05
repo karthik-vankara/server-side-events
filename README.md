@@ -25,16 +25,20 @@ sse/
 ├── phase3.md              ← Phase 3 notes
 ├── phase4.md              ← Phase 4 notes
 ├── phase5.md              ← Phase 5 notes
+├── auth.md                ← Authentication notes
 ├── phase1-server.js       ← Phase 1 server
 ├── phase2-server.js       ← Phase 2 server
 ├── phase3-server.js       ← Phase 3 server
 ├── phase4-server.js       ← Phase 4 server
 ├── phase5-server.js       ← Phase 5 server
+├── auth-server.js         ← Authentication server
 └── client/
-    └── index.html         ← Client UI (updated per phase)
+    ├── index.html         ← Client UI (Phases 1-5)
+    └── auth.html          ← Authentication demo UI
 ```
 
-Run any phase: `node phaseN-server.js`
+Run a phase: `node phaseN-server.js`
+Run auth demo: `node auth-server.js`
 
 ---
 
@@ -80,6 +84,15 @@ Run any phase: `node phaseN-server.js`
 - Replay with subscription filtering
 - Route matching with query strings (pathname vs req.url)
 
+### Authentication
+- Why `EventSource` cannot send custom headers or use POST
+- URL token auth — simple but leaks in logs/history
+- Cookie auth — session-based, `HttpOnly`, `SameSite`, browser auto-sends
+- Bearer token auth — fetch-based SSE polyfill with `Authorization` header
+- Manual SSE stream parsing with `ReadableStream` and `TextDecoder`
+- Token validation, session management, and logout flow
+- Comparison of all 3 methods (security, complexity, auto-reconnect)
+
 ---
 
 ## Topics NOT Covered (Production Concerns)
@@ -88,12 +101,10 @@ These are real-world topics you'll need when deploying SSE in production:
 
 | Topic | The Problem |
 |---|---|
-| **Authentication** | `EventSource` cannot send custom headers. Auth must use cookies, URL tokens, or a fetch-based polyfill. |
 | **CORS** | Cross-origin SSE requires `Access-Control-Allow-Origin`, `Access-Control-Allow-Credentials`, and special preflight handling. |
 | **Horizontal Scaling** | SSE connections are sticky to one server instance. Broadcasting across multiple servers requires Redis pub/sub or similar. |
 | **JSON Payloads** | SSE is text-only. Structured data requires `JSON.stringify` on server and `JSON.parse(event.data)` on client, with error handling. |
 | **Error Handling** | What happens on 4xx/5xx responses? Browser stops reconnecting on non-2xx. Need max reconnect logic and exponential backoff. |
-| **EventSource Limitations** | No custom headers, no POST method, no binary data. When these are needed, use a fetch-based SSE polyfill. |
 | **Rate Limiting / Backpressure** | Server sends faster than client can consume. Need to detect slow clients and drop or buffer messages. |
 | **Security** | XSS via unescaped `event.data`, injection through untrusted payloads. Need sanitization and Content Security Policy. |
 | **SSE vs WebSockets** | SSE = one-way, HTTP-based, auto-reconnect. WebSockets = bidirectional, lower latency, more complex. Choose based on need. |
