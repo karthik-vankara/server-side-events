@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SSE Authentication Demo</title>
+  <style>
+    body { font-family: monospace; padding: 20px; }
+    .panel { border: 1px solid #ccc; padding: 15px; margin: 15px 0; }
+    .panel h3 { margin-top: 0; }
+    .status { padding: 10px; margin: 10px 0; font-weight: bold; }
+    .status.connected { background: #d4edda; color: #155724; }
+    .status.disconnected { background: #f8d7da; color: #721c24; }
+    .status.connecting { background: #fff3cd; color: #856404; }
+    .status.error { background: #f5c6cb; color: #721c24; }
+    .info { background: #e2e3e5; padding: 10px; margin: 10px 0; }
+    #messages { max-height: 400px; overflow-y: auto; }
+    #messages .msg { margin: 4px 0; padding: 6px 10px; border-bottom: 1px solid #eee; font-size: 0.9em; }
+    #messages .msg .meta { color: #888; font-size: 0.85em; }
+    #messages .msg.welcome { background: #d4edda; }
+    #messages .msg.message { background: #f0f0f0; }
+    #messages .msg.system { background: #e8f4fd; }
+    #messages .msg.error { background: #f8d7da; }
+    button { padding: 8px 16px; margin: 4px; cursor: pointer; }
+    input, select { padding: 6px; margin: 4px; }
+    .method { padding: 8px; margin: 8px 0; border-left: 3px solid #007bff; background: #f8f9fa; }
+    .method code { background: #e9ecef; padding: 2px 6px; border-radius: 3px; }
+    .token-list { background: #fff3cd; padding: 10px; margin: 10px 0; }
+    .token-list code { background: #e9ecef; padding: 2px 6px; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <h1>SSE Authentication Demo</h1>
+
+  <!-- Valid tokens for reference -->
+  <div class="token-list">
+    <strong>Valid tokens for testing:</strong><br>
+    <code>token-alice-123</code> &nbsp;
+    <code>token-bob-456</code> &nbsp;
+    <code>token-charlie-789</code>
+  </div>
+
+  <!-- Connection status -->
+  <div id="status" class="status disconnected">Disconnected</div>
+
+  <!-- State panel -->
+  <div class="info">
+    <p><strong>Auth method:</strong> <span id="authMethod">—</span></p>
+    <p><strong>Username:</strong> <span id="username">—</span></p>
+    <p><strong>Messages received:</strong> <span id="msgCount">0</span></p>
+  </div>
+
+  <!-- ────────────────────────────────────────────── -->
+  <!-- Method 1: URL Token Authentication -->
+  <!-- ────────────────────────────────────────────── -->
+  <div class="panel">
+    <h3>Method 1: URL Token</h3>
+    <div class="method">
+      Token is passed in the query string: <code>/events?token=token-alice-123</code>
+    </div>
+    <p><strong>Pros:</strong> Simple, works with native EventSource</p>
+    <p><strong>Cons:</strong> Token appears in browser history, server logs, proxy logs</p>
+    <input type="text" id="urlToken" placeholder="token-alice-123" value="token-alice-123" style="width: 250px;">
+    <button id="btnUrlToken">Connect via URL Token</button>
+  </div>
+
+  <!-- ────────────────────────────────────────────── -->
+  <!-- Method 2: Cookie Authentication -->
+  <!-- ────────────────────────────────────────────── -->
+  <div class="panel">
+    <h3>Method 2: Cookie Auth</h3>
+    <div class="method">
+      1. POST <code>/login</code> with token → server sets session cookie<br>
+      2. Browser automatically sends cookie on <code>/events</code> request
+    </div>
+    <p><strong>Pros:</strong> Token not in URL, HTTP-only cookie can't be read by JS</p>
+    <p><strong>Cons:</strong> Requires same-origin or CORS with credentials</p>
+    <input type="text" id="cookieToken" placeholder="token-alice-123" value="token-alice-123" style="width: 250px;">
+    <button id="btnLogin">Step 1: Login</button>
+    <button id="btnCookieConnect">Step 2: Connect via Cookie</button>
+    <button id="btnLogout">Logout</button>
+    <p id="loginStatus" style="color: #888;"></p>
+  </div>
+
+  <!-- ────────────────────────────────────────────── -->
+  <!-- Method 3: Bearer Token (Fetch Polyfill) -->
+  <!-- ────────────────────────────────────────────── -->
+  <div class="panel">
+    <h3>Method 3: Bearer Token (Fetch Polyfill)</h3>
+    <div class="method">
+      Custom SSE client using <code>fetch()</code> with <code>Authorization: Bearer</code> header
+    </div>
+    <p><strong>Pros:</strong> Full header control, standard auth pattern</p>
+    <p><strong>Cons:</strong> More complex client code, no built-in auto-reconnect</p>
+    <input type="text" id="bearerToken" placeholder="token-alice-123" value="token-alice-123" style="width: 250px;">
+    <button id="btnBearer">Connect via Bearer Token</button>
+  </div>
+
+  <!-- Controls -->
+  <div>
+    <button id="btnClose">Close Connection</button>
+  </div>
+
+  <!-- Message log -->
+  <h2>Messages</h2>
+  <div id="messages"></div>
+
+  <script>
+    const statusDiv = document.getElementById('status');
+    const authMethodSpan = document.getElementById('authMethod');
+    const usernameSpan = document.getElementById('username');
+    const msgCountSpan = document.getElementById('msgCount');
+    const messagesDiv = document.getElementById('messages');
+    const loginStatus = document.getElementById('loginStatus');
+
+    let source = null;
+    let msgCount = 0;
+    let abortController = null; // For fetch-based SSE
+
+    // ──────────────────────────────────────────────
+    // Status helper
+    // ──────────────────────────────────────────────
+    function updateStatus(state, text) {
+      const classes = {
+        connected: 'connected',
+        disconnected: 'disconnected',
+        connecting: 'connecting',
+        error: 'error',
+      };
+      statusDiv.textContent = text || state;
+      statusDiv.className = 'status ' + (classes[state] || 'disconnected');
+    }
+
+    // ──────────────────────────────────────────────
+    // Message helper
+    // ──────────────────────────────────────────────
+    function addMessage(event, data, type) {
+      const div = document.createElement('div');
+      div.className = `msg ${type}`;
+      div.innerHTML = `<span class="meta">[${event}]</span> ${data}`;
+      messagesDiv.appendChild(div);
+      messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    }
+
+    // ──────────────────────────────────────────────
+    // Close any existing connection
+    // ──────────────────────────────────────────────
+    function closeExisting() {
+      // Close native EventSource
+      if (source) {
+        source.close();
+        source = null;
+      }
+      // Abort fetch-based connection
+      if (abortController) {
+        abortController.abort();
+        abortController = null;
+      }
+      msgCount = 0;
+      msgCountSpan.textContent = 0;
+    }
+
+    // ──────────────────────────────────────────────
+    // Handle incoming SSE message (shared by all methods)
+    // ──────────────────────────────────────────────
+    function handleMessage(event, data) {
+      msgCount++;
+      msgCountSpan.textContent = msgCount;
+
+      if (event === 'welcome') {
+        // Extract username from welcome message
+        const match = data.match(/Authenticated as "([^"]+)"/);
+        if (match) usernameSpan.textContent = match[1];
+        addMessage(event, data, 'welcome');
+      } else if (event === 'message') {
+        addMessage(event, data, 'message');
+      }
+    }
+
+    // ══════════════════════════════════════════════
+    // METHOD 1: URL Token Authentication
+    // ══════════════════════════════════════════════
+    //
+    // Uses native EventSource with token in query string.
+    // Simplest approach but token leaks in logs/history.
+    //
+    document.getElementById('btnUrlToken').addEventListener('click', function () {
+      closeExisting();
+
+      const token = document.getElementById('urlToken').value.trim();
+      if (!token) return;
+
+      updateStatus('connecting', 'Connecting via URL token...');
+      authMethodSpan.textContent = 'url-token';
+
+      // Token is visible in the URL — this is the security risk
+      source = new EventSource(`/events?token=${encodeURIComponent(token)}`);
+
+      source.onopen = function () {
+        updateStatus('connected', 'Connected — URL Token Auth');
+      };
+
+      // Native EventSource only has onmessage for unnamed events.
+      // We need addEventListener for named events.
+      source.addEventListener('welcome', function (e) {
+        handleMessage('welcome', e.data);
+      });
+
+      source.addEventListener('message', function (e) {
+        handleMessage('message', e.data);
+      });
+
+      source.onerror = function () {
+        // Check if we got a 401 (auth failed)
+        if (!source.readyState || source.readyState === 2) {
+          updateStatus('error', 'Connection failed — check your token');
+          addMessage('error', 'Authentication failed or connection lost', 'error');
+        }
+      };
+    });
+
+    // ══════════════════════════════════════════════
+    // METHOD 2: Cookie Authentication
+    // ══════════════════════════════════════════════
+    //
+    // Two-step process:
+    //   1. POST /login with token → server sets session cookie
+    //   2. EventSource to /events → browser sends cookie automatically
+    //
+    // Step 1: Login
+    document.getElementById('btnLogin').addEventListener('click', async function () {
+      const token = document.getElementById('cookieToken').value.trim();
+      if (!token) return;
+
+      loginStatus.textContent = 'Logging in...';
+
+      try {
+        const res = await fetch('/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token }),
+        });
+
+        const data = await res.json();
+
+        if (!res.ok) {
+          loginStatus.textContent = `Login failed: ${data.error}`;
+          return;
+        }
+
+        loginStatus.textContent = `Logged in as "${data.username}" — cookie set`;
+        addMessage('system', `Logged in as "${data.username}" via cookie`, 'system');
+      } catch (err) {
+        loginStatus.textContent = `Login error: ${err.message}`;
+      }
+    });
+
+    // Step 2: Connect via cookie
+    document.getElementById('btnCookieConnect').addEventListener('click', function () {
+      closeExisting();
+
+      updateStatus('connecting', 'Connecting via cookie...');
+      authMethodSpan.textContent = 'cookie';
+
+      // Browser automatically sends the session cookie with this request.
+      // No token in URL, no custom headers needed.
+      source = new EventSource('/events');
+
+      source.onopen = function () {
+        updateStatus('connected', 'Connected — Cookie Auth');
+      };
+
+      source.addEventListener('welcome', function (e) {
+        handleMessage('welcome', e.data);
+      });
+
+      source.addEventListener('message', function (e) {
+        handleMessage('message', e.data);
+      });
+
+      source.onerror = function () {
+        if (!source.readyState || source.readyState === 2) {
+          updateStatus('error', 'Connection failed — are you logged in?');
+          addMessage('error', 'Authentication failed — try logging in first', 'error');
+        }
+      };
+    });
+
+    // Logout
+    document.getElementById('btnLogout').addEventListener('click', async function () {
+      try {
+        await fetch('/logout', { method: 'POST' });
+        loginStatus.textContent = 'Logged out — cookie cleared';
+        addMessage('system', 'Logged out', 'system');
+        closeExisting();
+        updateStatus('disconnected', 'Disconnected — logged out');
+        usernameSpan.textContent = '—';
+        authMethodSpan.textContent = '—';
+      } catch (err) {
+        loginStatus.textContent = `Logout error: ${err.message}`;
+      }
+    });
+
+    // ══════════════════════════════════════════════
+    // METHOD 3: Bearer Token (Fetch Polyfill)
+    // ══════════════════════════════════════════════
+    //
+    // Custom SSE client using fetch() with Authorization header.
+    // This is what you'd use in production when you need proper auth.
+    //
+    document.getElementById('btnBearer').addEventListener('click', function () {
+      closeExisting();
+
+      const token = document.getElementById('bearerToken').value.trim();
+      if (!token) return;
+
+      updateStatus('connecting', 'Connecting via Bearer token...');
+      authMethodSpan.textContent = 'bearer';
+
+      // Create an AbortController so we can cancel the fetch later
+      abortController = new AbortController();
+
+      // Start a fetch request with Authorization header
+      // This is NOT EventSource — it's a raw HTTP request
+      fetch('/events', {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+        signal: abortController.signal,
+      })
+        .then((response) => {
+          if (!response.ok) {
+            if (response.status === 401) {
+              updateStatus('error', 'Authentication failed — invalid token');
+              addMessage('error', '401 Unauthorized — check your token', 'error');
+            } else {
+              updateStatus('error', `Connection failed: ${response.status}`);
+              addMessage('error', `Server returned ${response.status}`, 'error');
+            }
+            return;
+          }
+
+          updateStatus('connected', 'Connected — Bearer Token Auth');
+
+          // Read the response as a stream
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+
+          function readStream() {
+            reader.read().then(({ done, value }) => {
+              if (done) {
+                updateStatus('disconnected', 'Stream ended');
+                addMessage('system', 'Connection closed by server', 'system');
+                return;
+              }
+
+              // Decode the chunk and add to buffer
+              buffer += decoder.decode(value, { stream: true });
+
+              // SSE messages are separated by double newlines
+              const messages = buffer.split('\n\n');
+
+              // Keep the last incomplete chunk in the buffer
+              buffer = messages.pop() || '';
+
+              for (const message of messages) {
+                if (!message.trim()) continue;
+
+                // Parse SSE fields
+                let event = 'message'; // default event name
+                let data = '';
+
+                for (const line of message.split('\n')) {
+                  if (line.startsWith('event: ')) {
+                    event = line.slice(7);
+                  } else if (line.startsWith('data: ')) {
+                    data = line.slice(6);
+                  } else if (line.startsWith(':')) {
+                    // Comment/heartbeat — ignore
+                  }
+                }
+
+                handleMessage(event, data);
+              }
+
+              // Continue reading
+              readStream();
+            }).catch((err) => {
+              if (err.name === 'AbortError') {
+                updateStatus('disconnected', 'Connection closed by user');
+              } else {
+                updateStatus('error', `Stream error: ${err.message}`);
+              }
+            });
+          }
+
+          readStream();
+        })
+        .catch((err) => {
+          if (err.name === 'AbortError') {
+            // Connection was intentionally closed
+          } else {
+            updateStatus('error', `Connection error: ${err.message}`);
+            addMessage('error', err.message, 'error');
+          }
+        });
+    });
+
+    // ──────────────────────────────────────────────
+    // Button: Close connection
+    // ──────────────────────────────────────────────
+    document.getElementById('btnClose').addEventListener('click', function () {
+      closeExisting();
+      updateStatus('disconnected', 'Disconnected');
+      addMessage('system', 'Connection closed by user', 'system');
+    });
+  </script>
+</body>
+</html>
